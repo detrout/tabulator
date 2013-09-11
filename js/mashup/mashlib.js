@@ -3839,8 +3839,11 @@ $rdf.IndexedFormula.prototype.setPrefixForURI = function(prefix, nsuri) {
     //See http://dig.csail.mit.edu/cgi-bin/roundup.cgi/$rdf/issue227
     if(prefix=="tab" && this.namespaces["tab"]) {
         return;
-    }
-    this.namespaces[prefix] = nsuri
+    } // There are files around with long badly generated prefixes like this
+    if (prefix.slice(0,2) === 'ns' || prefix.slice(0,7) === 'default') {
+        return;
+    };
+    this.namespaces[prefix] = nsuri;
 }
 
 // Deprocated ... name too generic
@@ -5483,7 +5486,7 @@ $rdf.sparqlUpdate = function() {
 
         var request;
         var definitive = false;
-        var requests = kb.each(undefined, this.ns.link("requestedURI"), $rdf.Util.uri.docpart(uri));
+        var requests = kb.each(undefined, this.ns.link("requestedURI"), $rdf.uri.docpart(uri));
         for (var r=0; r<requests.length; r++) {
             request = requests[r];
             if (request !== undefined) {
@@ -5821,8 +5824,8 @@ $rdf.sparqlUpdate = function() {
             // Write the new version back
             
             var candidateTarget = kb.the(response, this.ns.httph("content-location"));
-            if (candidateTarget) targetURI = Util.uri.join(candidateTarget.value, targetURI);
-            var xhr = Util.XMLHTTPFactory();
+            if (candidateTarget) targetURI = $rdf.uri.join(candidateTarget.value, targetURI);
+            var xhr = $rdf.Util.XMLHTTPFactory();
             xhr.onreadystatechange = function (){
                 if (xhr.readyState == 4){
                     //formula from sparqlUpdate.js, what about redirects?
@@ -5911,7 +5914,47 @@ $rdf.sparqlUpdate = function() {
         } else throw "Unhandled edit method: '"+protocol+"' for "+doc;
     };
 
+    // This suitable for an inital creation of a document
+    //
+    sparql.prototype.put = function(doc, newSts, content_type, callback) {
 
+        var documentString;
+        var kb = this.store;
+       
+        //serialize to te appropriate format
+        var sz = $rdf.Serializer(kb);
+        sz.suggestNamespaces(kb.namespaces);
+        sz.setBase(doc.uri);//?? beware of this - kenny (why? tim)                   
+        switch(content_type){
+            case 'application/rdf+xml': 
+                documentString = sz.statementsToXML(newSts);
+                break;
+            case 'text/n3':
+            case 'text/turtle':
+            case 'application/x-turtle': // Legacy
+            case 'application/n3': // Legacy
+                documentString = sz.statementsToN3(newSts);
+                break;
+            default:
+                throw "Content-type "+content_type +" not supported for data PUT";                                                                            
+        }
+        
+        var xhr = $rdf.Util.XMLHTTPFactory();
+        xhr.onreadystatechange = function (){
+            if (xhr.readyState == 4){
+                //formula from sparqlUpdate.js, what about redirects?
+                var success = (!xhr.status || (xhr.status >= 200 && xhr.status < 300));
+                callback(doc.uri, success, xhr.responseText);
+            }
+        };
+        xhr.open('PUT', doc.uri, true);
+        //assume the server does PUT content-negotiation.
+        xhr.setRequestHeader('Content-type', content_type);//OK?
+        xhr.send(documentString);
+    
+    };
+    
+    
 
     return sparql;
 
@@ -5987,6 +6030,7 @@ var __Serializer = function( store ){
     this.flags = "";
     this.base = null;
     this.prefixes = [];
+    this.namespacesUsed = [];
     this.keywords = ['a']; // The only one we generate at the moment
     this.prefixchars = "abcdefghijklmnopqustuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     this.incoming = null;  // Array not calculated yet
@@ -6031,6 +6075,8 @@ __Serializer.prototype.fromStr = function(s) {
 */
 
 __Serializer.prototype.suggestPrefix = function(prefix, uri) {
+    if (prefix.slice(0,7) === 'default') return; // Try to weed these out
+    if (prefix.slice(0,2) === 'ns') return; //  From others inferior algos
     this.prefixes[uri] = prefix;
 }
 
@@ -6237,8 +6283,6 @@ __Serializer.prototype.statementsToN3 = function(sts) {
     var indent = 4;
     var width = 80;
 
-    var namespaceCounts = []; // which have been used
-
     var predMap = {
         'http://www.w3.org/2002/07/owl#sameAs': '=',
         'http://www.w3.org/2000/10/swap/log#implies': '=>',
@@ -6408,8 +6452,9 @@ __Serializer.prototype.statementsToN3 = function(sts) {
         var str = '';
         if (this.defaultNamespace)
           str += '@prefix : <'+this.defaultNamespace+'>.\n';
-        for (var ns in namespaceCounts) {
-            if (!namespaceCounts.hasOwnProperty(ns)) continue;
+        for (var ns in this.prefixes) {
+            if (!this.prefixes.hasOwnProperty(ns)) continue;
+            if (!this.namespacesUsed[ns]) continue;
             str += '@prefix ' + this.prefixes[ns] + ': <'+ns+'>.\n';
         }
         return str + '\n';
@@ -6538,7 +6583,7 @@ __Serializer.prototype.symbolToN3 = function symbolToN3(x) {  // c.f. symbolStri
             }
             var prefix = this.prefixes[namesp];
             if (prefix) {
-                //namespaceCounts[namesp] = true;
+                this.namespacesUsed[namesp] = true;
                 return prefix + ':' + localid;
             }
             if (uri.slice(0, j) == this.base)
@@ -6694,7 +6739,7 @@ __Serializer.prototype.statementsToXML = function(sts) {
             case '<':
               return '&lt;';
             case '"':
-              return '&quot;';
+              return '&quot;'; //'
           }
         });
     }
@@ -6710,7 +6755,7 @@ __Serializer.prototype.statementsToXML = function(sts) {
       var type, t, st, pred;
       var sts = stats.subjects[this.toStr(subject)]; // relevant statements
       if (typeof sts == 'undefined') {
-        throw('Cant find statements for '+subject);
+        throw('Serializing XML - Cant find statements for '+subject);
       }
 
 
@@ -8594,6 +8639,11 @@ Also lower could be optional tools for various classes.
 /**
 * Few General purpose utility functions used in the panes
 * oshani@csail.mit.edu 
+*
+* Includes form-oriented widgets, and sign-on sign-up widgets.
+*
+*  Note... For pointers to posssible text-editing code, see
+*  http://stackoverflow.com/questions/6756407/what-contenteditable-editors
 */
 
 
@@ -9586,7 +9636,7 @@ tabulator.panes.utils.makeSelectForOptions = function(dom, kb, subject, predicat
     var n = 0; var uris ={}; // Count them
     for (var i=0; i < possible.length; i++) {
         var sub = possible[i];
-        // tabulator.log.warn('Select element: '+ sub)
+        // tabulator.log.debug('Select element: '+ sub)
         if (sub.uri in uris) continue;
         uris[sub.uri] = true; n++;
     } // uris is now the set of possible options
@@ -10195,7 +10245,7 @@ tabulator.panes.widget.twoLine[
 //  - Load preferences file
 //  - Prompt user for workspaces
 // 
-tabulator.panes.utils.selectWorkspace = function(dom, callback) {
+tabulator.panes.utils.selectWorkspace = function(dom, callbackWS) {
 
     var me_uri = tabulator.preferences.get('me');
     var me = me_uri && tabulator.kb.sym(me_uri);
@@ -10211,7 +10261,7 @@ tabulator.panes.utils.selectWorkspace = function(dom, callback) {
         if (w.length == 1) {
         
             say( "Workspace used: " + w[0].uri);  
-            callback(w[0]); 
+            callbackWS(w[0]); 
 
         } else if (w.length == 0 ) {
             say("You don't seem to have any workspaces. ")
@@ -10222,6 +10272,8 @@ tabulator.panes.utils.selectWorkspace = function(dom, callback) {
             // say( w.length + " workspaces for " + id + "Chose one.");
             var table = dom.createElement('table');
             table.setAttribute('style', 'border-collapse:separate; border-spacing: 0.5em;')
+            
+            // var popup = window.open(undefined, '_blank', { height: 300, width:400 }, false)
             box.appendChild(table);
             var row = 0;
             w = w.filter(function(x){ return !(kb.holds(x, tabulator.ns.rdf('type'), // Ignore master workspaces
@@ -10240,7 +10292,8 @@ tabulator.panes.utils.selectWorkspace = function(dom, callback) {
                 }
                 col2 = dom.createElement('td');
                 style = kb.any(ws, tabulator.ns.ui('style'));
-                col2.setAttribute('style', deselectedStyle + (style ? style.value : ''));
+                style = style ? style.value : ''
+                col2.setAttribute('style', deselectedStyle + style);
                 tr.target = ws.uri;
                 var label = kb.any(ws, tabulator.ns.rdfs('label'))
                 col2.textContent = label || "";
@@ -10248,24 +10301,51 @@ tabulator.panes.utils.selectWorkspace = function(dom, callback) {
                 if (i == 0) {
                     col3 = dom.createElement('td');
                     col3.setAttribute('rowspan', ''+w.length + 1);
+                    // col3.textContent = '@@@@@ remove';
+                    col3.setAttribute('style', 'width:50%;');
                     tr.appendChild(col3);
                 }
                 table.appendChild(tr);
-                function foo (ws){
-                    col2.addEventListener('click', function(e){
-                        comment = kb.any(ws, tabulator.ns.rdfs('comment'));
-                        col3.textContent = comment ? comment.value : '---';
+
+
+
+                var addMyListener = function (container, detail,  style, ws1) {
+                    container.addEventListener('click', function(e){
+                        col3.textContent = detail;
+                        col3.setAttribute('style', style);
+                        col3.appendChild(addContinueButton(ws1));
                     }, true); // capture vs bubble
-                }(ws);
-            }
+                    return;
+                };
+
+                var addContinueButton = function (selectedWorkspace) {
+                    var button = dom.createElement('button');
+                    button.textContent = "Continue";
+                    // button.setAttribute('style', style);
+                    button.addEventListener('click', function(e){
+                        button.disabled = true;
+                        callbackWS(selectedWorkspace);
+                        button.textContent = '---->';
+                    }, true); // capture vs bubble
+                    return button;
+                };
+
+                var comment = kb.any(ws, tabulator.ns.rdfs('comment'));
+                addMyListener(col2, comment? comment.value : '',
+                                 deselectedStyle + style, ws);
+            };
+
+            col1.textContent = "Chose a workspace for this:";
+            col1.setAttribute('style', 'vertical-align:middle;')
+
+            // last line with "Make new workspace"
             tr = dom.createElement('tr');
             col2 = dom.createElement('td')
             col2.setAttribute('style', cellStyle);
+            col2.textContent = "+ Make a new workspace";
+            addMyListener(col2, "Set up a new workspace", '');
             tr.appendChild(col2);
             table.appendChild(tr);
-            col1.textContent = "Chose a workspace for this:";
-            col1.setAttribute('style', 'vertical-align:middle;')
-            col2.textContent = "+ Make a new workspace";
 
         };
     };
@@ -10306,13 +10386,14 @@ tabulator.panes.utils.selectWorkspace = function(dom, callback) {
 
 //////////////////// Craete a new instance of an app
 //
-//  An instance of an app could be an issue tracker for a given project,
+//  An instance of an app could be e.g. an issue tracker for a given project,
 // or a chess game, or calendar, or a health/fitness record for a person.
 //
 
 
 tabulator.panes.utils.newAppInstance = function(dom, label, callback) {
     var gotWS = function(ws) {
+        //$rdf.log.debug("newAppInstance: Selected workspace = " + (ws? ws.uri : 'none'))
         callback(ws);
     };
     var div = dom.createElement('div');
@@ -10396,9 +10477,9 @@ tabulator.panes.register( {
             sparqlService.update(deletions, insertions, function(uri, ok, body){});
         }
 
-        var complain = function complain(message){
+        var say = function say(message, style){
             var pre = myDocument.createElement("pre");
-            pre.setAttribute('style', 'color: grey');
+            pre.setAttribute('style', style ? style :'color: grey');
             div.appendChild(pre);
             pre.appendChild(myDocument.createTextNode(message));
             return pre
@@ -10409,6 +10490,12 @@ tabulator.panes.register( {
             var div2 = thisPane.render(subject, myDocument);
             parent.replaceChild(div2, div);
         };
+
+        var timestring = function() {
+            var now = new Date();
+            return ''+ now.getTime();
+            // http://www.w3schools.com/jsref/jsref_obj_date.asp
+        }
 
         var shortDate = function(str) {
             var now = $rdf.term(new Date()).value;
@@ -10427,10 +10514,7 @@ tabulator.panes.register( {
                 titlefield.disabled = true;
                 sts = [];
                 
-                var now = new Date();
-                var timestamp = ''+ now.getTime();
-                // http://www.w3schools.com/jsref/jsref_obj_date.asp
-                var issue = kb.sym(stateStore.uri + '#' + 'Iss'+timestamp);
+                var issue = kb.sym(stateStore.uri + '#' + 'Iss'+timestring());
                 sts.push(new $rdf.Statement(issue, WF('tracker'), tracker, stateStore));
                 var title = kb.literal(titlefield.value);
                 sts.push(new $rdf.Statement(issue, DC('title'), title, stateStore))
@@ -10439,14 +10523,14 @@ tabulator.panes.register( {
                 sts.push(new $rdf.Statement(issue, DCT('created'), new Date(), stateStore));
 
                 var initialStates = kb.each(tracker, WF('initialState'));
-                if (initialStates.length == 0) complain('This tracker has no initialState');
+                if (initialStates.length == 0) say('This tracker has no initialState');
                 for (var i=0; i<initialStates.length; i++) {
                     sts.push(new $rdf.Statement(issue, ns.rdf('type'), initialStates[i], stateStore))
                 }
                 if (superIssue) sts.push (new $rdf.Statement(superIssue, WF('dependent'), issue, stateStore));
                 var sendComplete = function(uri, success, body) {
                     if (!success) {
-                         complain("Error: can\'t save new issue:" + body);
+                         say("Error: can\'t save new issue:" + body);
                         //dump('Tabulator issue pane: can\'t save new issue:\n\t'+body+'\n')
                     } else {
                         // dump('Tabulator issue pane: saved new issue\n')
@@ -10546,8 +10630,101 @@ tabulator.panes.register( {
 
             return form;
         };
-                             
- // //////////////////////////////////////////////////////////////////////////////       
+        
+                                                  
+        /////////////////////// Reproduction: Spawn a new instance of this app
+        
+        var newTrackerButton = function(thisTracker) {
+            return tabulator.panes.utils.newAppInstance(myDocument, "Start your own new tracker", function(ws){
+        
+                var appPathSegment = 'issuetracker.w3.org'; // how to allocate this string and connect to 
+
+                // say("Ready to make new instance at "+ws);
+                var sp = tabulator.ns.space;
+                var kb = tabulator.kb;
+                
+                var base = kb.any(ws, sp('uriPrefix')).value;
+                if (base.slice(-1) !== '/') {
+                    $rdf.log.error(appPathSegment + ": No / at end of uriPrefix " + base );
+                    base = base + '/';
+                }
+                base += appPathSegment + '/' + timestring() + '/'; // unique id 
+
+                var documentOf = function(x) {
+                    return kb.sym($rdf.uri.docpart(x.uri));
+                }
+
+                var stateStore = kb.any(tracker, WF('stateStore'));
+                var newStore = kb.sym(base + 'store.ttl');
+
+                var here = documentOf(thisTracker);
+
+                var oldBase = here.uri.slice(0, here.uri.lastIndexOf('/')+1);
+
+                var morph = function(x) { // Move any URIs in this space into that space
+                    if (x.elements !== undefined) return x.elements.map(morph); // Morph within lists
+                    if (x.uri === undefined) return x;
+                    var u = x.uri;
+                    if (u === stateStore.uri) return newStore; // special case
+                    if (u.slice(0, oldBase.length) === oldBase) {
+                        u = base + u.slice(oldBase.length);
+                        $rdf.log.debug(" Map "+ x.uri + " to " + u);
+                    }
+                    return kb.sym(u);
+                }
+                var there = morph(here);
+                var newTracker = morph(thisTracker); 
+                
+                var myConfig = kb.statementsMatching(undefined, undefined, undefined, here);
+                for (var i=0; i < myConfig.length; i++) {
+                    st = myConfig[i];
+                    kb.add(morph(st.subject), morph(st.predicate), morph(st.object), there);
+                }
+                
+                // Keep a paper trail   @@ Revisit when we have non-public ones @@ Privacy
+                //
+                kb.add(newTracker, tabulator.ns.space('inspiration'), thisTracker, stateStore);
+                
+                kb.add(newTracker, tabulator.ns.space('inspiration'), thisTracker, there);
+                
+                $rdf.log.debug("\n Ready to put " + kb.statementsMatching(undefined, undefined, undefined, there)); //@@
+
+
+                sparqlService.put(
+                    there,
+                    kb.statementsMatching(undefined, undefined, undefined, there),
+                    'text/turtle',
+                    function(uri2, ok, message) {
+                        if (ok) {
+                            sparqlService.put(newStore, [], 'text/turtle', function(uri3, ok, message) {
+                                if (ok) {
+                                    say("Ok The tracker created OK at: " + newTracker.uri +
+                                    "\nMake a note of it, bookmark it. ",
+                                     'color: #020; background-color: white;');
+                                } else {
+                                    say('FAILED to set up new store at: '+ newStore.uri +' : ' + message);
+                                };
+                            });
+                        } else {
+                            say('FAILED to save new tracker at: '+ there.uri +' : ' + message);
+                        };
+                    }
+                );
+                
+                // Created new data files.
+                // @@ Now create initial files - html skin, (Copy of mashlib, css?)
+                // @@ Now create form to edit configuation parameters
+                // @@ Optionally link new instance to list of instances -- both ways? and to child/parent?
+                // @@ Set up access control for new config and store. 
+                
+            }); // callback to newAppInstance
+
+            
+        }; // newTrackerButton
+
+ 
+ 
+///////////////////////////////////////////////////////////////////////////////
         
         
         
@@ -10595,7 +10772,7 @@ tabulator.panes.register( {
                 var stateStore = kb.any(tracker, WF('stateStore'));
                 var store = kb.sym(subject.uri.split('#')[0]);
 /*                if (stateStore != undefined && store.uri != stateStore.uri) {
-                    complain('(This bug is not stored in the default state store)')
+                    say('(This bug is not stored in the default state store)')
                 }
 */
                 var states = kb.any(tracker, WF('issueClass'));
@@ -10605,7 +10782,7 @@ tabulator.panes.register( {
                             setModifiedDate(store, kb, store);
                             rerender(div);
                         }
-                        else complain("Failed to change state:\n"+body);
+                        else say("Failed to change state:\n"+body);
                     })
                 div.appendChild(select);
 
@@ -10618,7 +10795,7 @@ tabulator.panes.register( {
                             setModifiedDate(store, kb, store);
                             rerender(div);
                         }
-                        else complain("Failed to change category:\n"+body);
+                        else say("Failed to change category:\n"+body);
                     }));
                 }
                 
@@ -10633,7 +10810,7 @@ tabulator.panes.register( {
                 div.appendChild(tabulator.panes.utils.makeDescription(myDocument, kb, subject, WF('description'),
                     store, function(ok,body){
                         if (ok) setModifiedDate(store, kb, store);
-                        else complain("Failed to description:\n"+body);
+                        else say("Failed to description:\n"+body);
                     }));
                 donePredicate(WF('description'));
 
@@ -10663,7 +10840,7 @@ tabulator.panes.register( {
                         subject, ns.wf('assignee'), devs, opts, store,
                         function(ok,body){
                             if (ok) setModifiedDate(store, kb, store);
-                            else complain("Failed to description:\n"+body);
+                            else say("Failed to description:\n"+body);
                         }));
                 }
 
@@ -10855,40 +11032,37 @@ tabulator.panes.register( {
                     query.pat.add(v['issue'], ns.rdf('type'), v['_cat_'+i]);
                     query.pat.add(v['_cat_'+i], ns.rdfs('subClassOf'), cats[i]);
                 }
-                //complain('Query pattern is:\n'+query.pat);
+                //say('Query pattern is:\n'+query.pat);
                 var tableDiv = tabulator.panes.utils.renderTableViewPane(myDocument, {'query': query} );
                 div.appendChild(tableDiv);
             });
         // end of Tracker instance
 
+            div.appendChild(newTrackerButton(subject));
+
         } else { 
-            complain("Error: Issue pane: No evidence that "+subject+" is either a bug or a tracker.")
+            say("Error: Issue pane: No evidence that "+subject+" is either a bug or a tracker.")
         }         
         if (!me_uri) {
-            complain("(You do not have your Web Id set. Sign in or sign up to make changes.)");
+            say("(You do not have your Web Id set. Sign in or sign up to make changes.)");
         } else {
-            complain("(Your webid is "+ me_uri+")");
+            say("(Your webid is "+ me_uri+")");
         };
         div.appendChild(tabulator.panes.utils.loginStatusBox(myDocument, function(webid){
-            // complaint.parent.removeChild(complaint);
+            // sayt.parent.removeChild(sayt);
             if (webid) {
                 me_uri = webid;
-                complain("(Logged in as "+ webid+")")
+                say("(Logged in as "+ webid+")")
             } else {
                 me_uri = undefined;
-                complain("(Logged out)")
+                say("(Logged out)")
             }
             me = me_uri? kb.sym(me_uri) : null;
         }));
         
-        div.appendChild(tabulator.panes.utils.newAppInstance(myDocument, "Start your own new tracker", function(ws){
-            complain("Ready to make new instance at "+ws);
-            //  @@ Now create initial files - html skin, tracker, state. (Copy of mashlib?)
-            // @@ Now create form to edit configuation parameters
-            // @@ Optionally link new instance to list of instances
-        }));
-
+        
         return div;
+
     }
 }, true);
 
